@@ -55,7 +55,8 @@ function buildGallery() {
 }
 
 function createState(art, index, mind) {
-  const image = new THREE.TextureLoader().load(art.image);
+  // 画像の読み込み後に縦横比を合わせます（読み込み前は正方形のままになるため）。
+  const image = new THREE.TextureLoader().load(art.image, () => { if (videoStates[index]) setAspect(videoStates[index]); });
   image.colorSpace = THREE.SRGBColorSpace;
   image.anisotropy = mind.renderer.capabilities.getMaxAnisotropy();
 
@@ -120,19 +121,38 @@ function ensureVideoTexture(state) {
 function waitForData(video) {
   if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return Promise.resolve();
   return new Promise((resolve, reject) => {
+    let kickTimer;
+    let failTimer;
     const done = () => { cleanup(); resolve(); };
-    const fail = () => { cleanup(); reject(new Error('動画を読み込めませんでした。')); };
-    const cleanup = () => { video.removeEventListener('loadeddata', done); video.removeEventListener('error', fail); };
-    video.addEventListener('loadeddata', done, { once: true });
-    video.addEventListener('error', fail, { once: true });
+    const fail = () => { cleanup(); reject(new Error('動画を読み込めませんでした。通信状況を確認してください。')); };
+    const cleanup = () => {
+      clearTimeout(kickTimer);
+      clearTimeout(failTimer);
+      video.removeEventListener('loadeddata', done);
+      video.removeEventListener('canplay', done);
+      video.removeEventListener('error', fail);
+    };
+    video.addEventListener('loadeddata', done);
+    video.addEventListener('canplay', done);
+    video.addEventListener('error', fail);
+    video.preload = 'auto';
     video.load();
+    // iOSは読み込みだけでは最初のフレームを用意しないことがあるため、無音再生で読み込みを促します。
+    kickTimer = setTimeout(() => {
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) { done(); return; }
+      const wasMuted = video.muted;
+      video.muted = true;
+      video.play().then(() => { video.pause(); video.muted = wasMuted; }).catch(() => { video.muted = wasMuted; });
+    }, 1500);
+    failTimer = setTimeout(fail, 30000);
   });
 }
 
 function waitForSeek(video) {
   if (video.currentTime === 0 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return Promise.resolve();
   return new Promise((resolve) => {
-    video.addEventListener('seeked', resolve, { once: true });
+    const timer = setTimeout(resolve, 1500);
+    video.addEventListener('seeked', () => { clearTimeout(timer); resolve(); }, { once: true });
     video.currentTime = 0;
   });
 }
@@ -238,50 +258,115 @@ function stopState(state) {
   state.overlay.visible = true;
 }
 
+function ensureMindAR() {
+  if (mindar) return mindar;
+  mindar = new MindARThree({
+    container: $('#ar-container'), imageTargetSrc: `${baseUrl}targets.mind`, maxTrack: 1,
+    uiLoading: 'no', uiScanning: 'no', uiError: 'no',
+    filterMinCF: 0.0005, filterBeta: 1000, warmupTolerance: 4, missTolerance: 6,
+  });
+  // CSS3DRendererは使わないため、透明な全面レイヤーがタップを奪わないようにします。
+  mindar.cssRenderer.domElement.style.pointerEvents = 'none';
+  videoStates = [];
+  anchors = artworks.map((art, i) => createState(art, i, mindar));
+  return mindar;
+}
+
+function cameraTrack() {
+  return mindar?.video?.srcObject?.getVideoTracks?.()[0] ?? null;
+}
+
+// MindARが作るカメラ映像・キャンバスの位置を、現在の画面サイズに合わせ直します。
+// iOSではアドレスバーの伸縮やカメラ起動直後に画面サイズが変わるため、少し遅らせて再計算します。
+let layoutTimer;
+function relayout() {
+  if (!cameraRunning || !mindar?.video) return;
+  const container = $('#ar-container');
+  if (!container.clientWidth || !container.clientHeight || !mindar.video.videoWidth) return;
+  try { mindar.resize(); } catch { /* Not ready yet. */ }
+}
+function scheduleRelayout() {
+  relayout();
+  requestAnimationFrame(relayout);
+  clearTimeout(layoutTimer);
+  layoutTimer = setTimeout(relayout, 350);
+}
+
+function shutdownMindAR() {
+  if (!mindar) return;
+  try { mindar.controller?.stopProcessVideo(); } catch { /* Not started. */ }
+  try { mindar.controller?.worker?.terminate(); } catch { /* Already terminated. */ }
+  mindar.controller = null;
+  const video = mindar.video;
+  if (video) {
+    video.srcObject?.getTracks().forEach((track) => track.stop());
+    video.srcObject = null;
+    video.remove();
+  }
+  // videoをnullにするとMindAR内部のresizeが何もしなくなります。
+  mindar.video = null;
+  mindar.renderer.setAnimationLoop(null);
+  mindar.renderer.clear();
+  for (const anchor of mindar.anchors) {
+    anchor.visible = false;
+    anchor.group.visible = false;
+  }
+}
+
+let pendingOperation = -1;
+let startTask = null;
+
 async function startCamera() {
-  if (cameraRunning) return;
+  if (cameraRunning || pendingOperation === operation) return;
+  const op = ++operation;
+  pendingOperation = op;
   const startButton = $('#camera-start');
+  startButton.classList.remove('hidden');
   startButton.disabled = true;
   startButton.textContent = '準備しています';
+  showScreen('camera-screen');
+  $('#camera-status').classList.remove('hidden');
+  $('#camera-status').textContent = 'カメラを準備しています';
+  let task = null;
   try {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('このブラウザではカメラを使えません。HTTPSのSafariまたはChromeで開いてください。');
-    showScreen('camera-screen');
-    $('#camera-status').classList.remove('hidden');
-    $('#camera-status').textContent = 'カメラを準備しています';
-    if (!mindar) {
-      mindar = new MindARThree({
-        container: $('#ar-container'), imageTargetSrc: `${baseUrl}targets.mind`, maxTrack: 1,
-        uiLoading: 'no', uiScanning: 'no', uiError: 'no',
-        filterMinCF: 0.0005, filterBeta: 1000, warmupTolerance: 4, missTolerance: 6,
-        environmentDeviceId: undefined,
-      });
-      videoStates = [];
-      anchors = artworks.map((art, i) => createState(art, i, mindar));
-    }
-    await mindar.start();
+    // 閉じる直前の起動処理が残っていれば、その後片付けを待ってから始めます。
+    if (startTask) await startTask.catch(() => {});
+    if (op !== operation) return;
+    ensureMindAR();
+    task = mindar.start();
+    startTask = task;
+    await task;
+    if (op !== operation) { shutdownMindAR(); return; }
+    const { renderer, scene, camera } = mindar;
+    renderer.setAnimationLoop(() => renderer.render(scene, camera));
     cameraRunning = true;
-    $('#camera-start').classList.add('hidden');
+    mindar.video.addEventListener('resize', scheduleRelayout);
+    cameraTrack()?.addEventListener('ended', () => { if (op === operation) restartCamera(); });
+    scheduleRelayout();
+    startButton.classList.add('hidden');
     $('#camera-status').textContent = '絵の全体を映してください';
   } catch (error) {
-    await stopCamera();
+    shutdownMindAR();
+    if (op !== operation) return;
     showScreen('camera-screen');
     startButton.classList.remove('hidden');
     startButton.disabled = false;
     startButton.textContent = 'もう一度試す';
-    $('#camera-status').textContent = error.message || 'カメラを開始できませんでした。';
+    $('#camera-status').textContent = error?.message || 'カメラを開始できませんでした。カメラの許可を確認してください。';
     $('#camera-status').classList.remove('hidden');
+  } finally {
+    if (startTask === task) startTask = null;
+    if (pendingOperation === op) pendingOperation = -1;
   }
 }
 
-async function stopCamera() {
-  if (mindar) {
-    try { mindar.stop(); } catch { /* Already stopped. */ }
-    mindar.renderer.setAnimationLoop(null);
-    mindar = null;
-  }
+function stopCamera() {
+  operation += 1;
+  pendingOperation = -1;
+  // 起動中の場合は、起動処理が終わった時点でstartCamera側が片付けます。
+  if (!startTask) shutdownMindAR();
   videoStates.forEach(stopState);
-  videoStates = [];
-  anchors = [];
   activeIndex = -1;
   cameraRunning = false;
   $('#replay-button').classList.add('hidden');
@@ -291,9 +376,15 @@ async function stopCamera() {
   $('#camera-start').textContent = 'カメラをはじめる';
 }
 
-$('#camera-open').addEventListener('click', () => { showScreen('camera-screen'); startCamera(); });
+function restartCamera() {
+  if ($('#camera-screen').classList.contains('hidden')) return;
+  stopCamera();
+  startCamera();
+}
+
+$('#camera-open').addEventListener('click', startCamera);
 $('#camera-start').addEventListener('click', startCamera);
-$('#camera-close').addEventListener('click', async () => { await stopCamera(); showScreen('home'); });
+$('#camera-close').addEventListener('click', () => { stopCamera(); showScreen('home'); });
 $('#gallery-open').addEventListener('click', () => showScreen('gallery'));
 $('#help-open').addEventListener('click', () => showScreen('help'));
 document.querySelectorAll('[data-go-home]').forEach((button) => button.addEventListener('click', () => showScreen('home')));
@@ -308,7 +399,25 @@ $('#enable-sound').addEventListener('click', async () => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) videoStates.forEach((state) => { if (!state.art.loop) state.video.pause(); });
+  if (document.hidden) {
+    videoStates.forEach((state) => { if (!state.art.loop) state.video.pause(); });
+    return;
+  }
+  // 別アプリから戻るとiOSがカメラを止めていることがあるため、その場合は再起動します。
+  if (cameraRunning && cameraTrack()?.readyState === 'ended') restartCamera();
+  else scheduleRelayout();
+});
+
+window.addEventListener('resize', scheduleRelayout);
+window.visualViewport?.addEventListener('resize', scheduleRelayout);
+// 端末を回転するとカメラ映像の縦横が入れ替わり認識がずれるため、カメラを開き直します。
+let lastPortrait = window.innerHeight >= window.innerWidth;
+window.addEventListener('orientationchange', () => {
+  setTimeout(() => {
+    const portrait = window.innerHeight >= window.innerWidth;
+    if (portrait !== lastPortrait && cameraRunning) restartCamera();
+    lastPortrait = portrait;
+  }, 400);
 });
 
 buildGallery();
