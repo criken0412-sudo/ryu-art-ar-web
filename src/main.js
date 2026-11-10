@@ -54,6 +54,58 @@ function buildGallery() {
   });
 }
 
+// 認識結果の細かな揺れを抑えるフィルター（One Euro Filter を位置・回転・大きさに分けて適用）。
+// 小さな揺れは強くならし、スマホを大きく動かしたときは素早く追従します。
+const SMOOTH = {
+  minCutoff: 0.8, // 静止時のなめらかさ（Hz）。小さいほど揺れが減り、遅れが増えます。
+  beta: 6, // 動いたときの追従の速さ。大きいほど速く動きに追いつきます。
+  dCutoff: 1.5,
+};
+const smoothAlpha = (dt, cutoff) => 1 / (1 + 1 / (2 * Math.PI * cutoff * dt));
+
+class PoseSmoother {
+  constructor() {
+    this.position = new THREE.Vector3();
+    this.quaternion = new THREE.Quaternion();
+    this.scale = new THREE.Vector3(1, 1, 1);
+    this.rawPosition = new THREE.Vector3();
+    this.rawQuaternion = new THREE.Quaternion();
+    this.rawScale = new THREE.Vector3();
+    this.reset();
+  }
+
+  reset() {
+    this.time = null;
+    this.moveSpeed = 0;
+    this.turnSpeed = 0;
+  }
+
+  update(matrix, target, now = performance.now()) {
+    matrix.decompose(this.rawPosition, this.rawQuaternion, this.rawScale);
+    if (this.time === null) {
+      this.position.copy(this.rawPosition);
+      this.quaternion.copy(this.rawQuaternion);
+      this.scale.copy(this.rawScale);
+    } else {
+      const dt = Math.min(0.25, Math.max(0.001, (now - this.time) / 1000));
+      const size = Math.max(1e-6, Math.abs(this.scale.x));
+      // 移動の速さは「絵の幅に対する割合／秒」で測るため、絵の大きさや距離に左右されません。
+      const move = (this.rawPosition.distanceTo(this.position) + this.rawScale.distanceTo(this.scale)) / size / dt;
+      const turn = this.quaternion.angleTo(this.rawQuaternion) / dt;
+      const ad = smoothAlpha(dt, SMOOTH.dCutoff);
+      this.moveSpeed += ad * (move - this.moveSpeed);
+      this.turnSpeed += ad * (turn - this.turnSpeed);
+      const moveAlpha = smoothAlpha(dt, SMOOTH.minCutoff + SMOOTH.beta * this.moveSpeed);
+      const turnAlpha = smoothAlpha(dt, SMOOTH.minCutoff + SMOOTH.beta * this.turnSpeed);
+      this.position.lerp(this.rawPosition, moveAlpha);
+      this.scale.lerp(this.rawScale, moveAlpha);
+      this.quaternion.slerp(this.rawQuaternion, turnAlpha);
+    }
+    this.time = now;
+    target.compose(this.position, this.quaternion, this.scale);
+  }
+}
+
 function createState(art, index, mind) {
   // 画像の読み込み後に縦横比を合わせます（読み込み前は正方形のままになるため）。
   const image = new THREE.TextureLoader().load(art.image, () => { if (videoStates[index]) setAspect(videoStates[index]); });
@@ -79,10 +131,18 @@ function createState(art, index, mind) {
   const state = videoStates[index];
   state.overlay = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide }));
   state.overlay.position.z = 0.002;
+  // MindARのアンカーは認識結果（生の位置）として使い、表示はならした位置の別グループで行います。
+  const display = new THREE.Group();
+  display.matrixAutoUpdate = false;
+  display.visible = false;
+  display.add(base, state.overlay);
+  mind.scene.add(display);
+  state.display = display;
+  state.smoother = new PoseSmoother();
   const anchor = mind.addAnchor(index);
-  anchor.group.add(base, state.overlay);
   anchor.onTargetFound = () => onTargetFound(index);
   anchor.onTargetLost = () => onTargetLost(index);
+  state.anchor = anchor;
   return anchor;
 }
 
@@ -258,12 +318,29 @@ function stopState(state) {
   state.overlay.visible = true;
 }
 
+// 毎フレーム、表示用グループを認識位置へなめらかに近づけます。
+function updateDisplays() {
+  for (const state of videoStates) {
+    if (!state.anchor.group.visible) {
+      if (state.display.visible) {
+        state.display.visible = false;
+        state.smoother.reset();
+      }
+      continue;
+    }
+    state.smoother.update(state.anchor.group.matrix, state.display.matrix);
+    state.display.matrixWorldNeedsUpdate = true;
+    state.display.visible = true;
+  }
+}
+
 function ensureMindAR() {
   if (mindar) return mindar;
   mindar = new MindARThree({
     container: $('#ar-container'), imageTargetSrc: `${baseUrl}targets.mind`, maxTrack: 1,
     uiLoading: 'no', uiScanning: 'no', uiError: 'no',
-    filterMinCF: 0.0005, filterBeta: 1000, warmupTolerance: 4, missTolerance: 6,
+    // MindAR側の平滑化は使わず（ほぼ素通し）、PoseSmootherでならします。
+    filterMinCF: 1, filterBeta: 0, warmupTolerance: 4, missTolerance: 6,
   });
   // CSS3DRendererは使わないため、透明な全面レイヤーがタップを奪わないようにします。
   mindar.cssRenderer.domElement.style.pointerEvents = 'none';
@@ -311,6 +388,10 @@ function shutdownMindAR() {
     anchor.visible = false;
     anchor.group.visible = false;
   }
+  for (const state of videoStates) {
+    state.display.visible = false;
+    state.smoother.reset();
+  }
 }
 
 let pendingOperation = -1;
@@ -339,7 +420,7 @@ async function startCamera() {
     await task;
     if (op !== operation) { shutdownMindAR(); return; }
     const { renderer, scene, camera } = mindar;
-    renderer.setAnimationLoop(() => renderer.render(scene, camera));
+    renderer.setAnimationLoop(() => { updateDisplays(); renderer.render(scene, camera); });
     cameraRunning = true;
     mindar.video.addEventListener('resize', scheduleRelayout);
     cameraTrack()?.addEventListener('ended', () => { if (op === operation) restartCamera(); });
