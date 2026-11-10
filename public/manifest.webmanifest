@@ -1,0 +1,10 @@
+{
+  "name": "北澤龍の動く絵",
+  "short_name": "北澤龍 AR",
+  "lang": "ja",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#050505",
+  "theme_color": "#050505",
+  "icons": [{ "src": "assets/app-icon.png", "sizes": "1024x1024", "type": "image/png" }]
+}
