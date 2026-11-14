@@ -13,7 +13,6 @@
     <div id="app">
       <main id="home" class="home-screen">
         <header class="topbar">
-          <img class="brand-icon" src="%BASE_URL%assets/app-icon.png" alt="" />
           <a class="site-link" href="https://www.ryukitazawa.com/works-1" target="_blank" rel="noreferrer">
             RYU KITAZAWA <span aria-hidden="true">↗</span>
           </a>
@@ -39,19 +38,15 @@
 
       <main id="gallery" class="gallery-screen hidden">
         <header class="subpage-header">
-          <button class="back-button" data-go-home aria-label="ホームへ戻る">‹</button>
-          <h1>作品</h1>
           <span></span>
+          <h1>作品</h1>
+          <button class="gallery-close" data-go-home aria-label="閉じる">閉じる</button>
         </header>
         <div id="artwork-grid" class="artwork-grid"></div>
       </main>
 
       <main id="detail" class="detail-screen hidden">
-        <header class="subpage-header">
-          <button class="back-button" data-go-gallery aria-label="作品一覧へ戻る">‹</button>
-          <h1 id="detail-title"></h1>
-          <span></span>
-        </header>
+        <button class="camera-control close-control detail-close" data-go-gallery aria-label="閉じる">×</button>
         <div class="detail-image-wrap"><img id="detail-image" alt="作品画像" /></div>
       </main>
 
@@ -75,7 +70,7 @@
         <button id="camera-close" class="camera-control close-control" aria-label="閉じる">×</button>
         <p id="camera-status" class="camera-status">絵の全体を映してください</p>
         <button id="replay-button" class="camera-control replay-control hidden" aria-label="もう一度再生">↻</button>
-        <button id="camera-start" class="camera-start-button">カメラをはじめる</button>
+        <button id="camera-start" class="camera-start-button hidden">カメラをはじめる</button>
         <button id="enable-sound" class="sound-control hidden" aria-label="音声を有効にする">♫</button>
       </section>
       <aside id="toast" class="toast hidden" role="status"></aside>
