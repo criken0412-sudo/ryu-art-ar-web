@@ -28,7 +28,38 @@ let operation = 0;
 let cameraRunning = false;
 
 function showScreen(id) {
+  const previous = screens.find((screen) => !$(`#${screen}`).classList.contains('hidden'));
+  if (id === 'camera-screen' && previous === 'home') {
+    $('#camera-screen').classList.remove('hidden');
+    const home = $('#home');
+    home.classList.remove('hidden');
+    revealCameraFromHome();
+    return;
+  }
   for (const screen of screens) $(`#${screen}`).classList.toggle('hidden', screen !== id);
+  if (id === 'home') {
+    const home = $('#home');
+    home.classList.remove('camera-transitioning', 'camera-transitioned');
+    home.style.removeProperty('transform-origin');
+  }
+}
+
+let cameraRevealToken = 0;
+function revealCameraFromHome() {
+  const home = $('#home');
+  const art = $('.home-art');
+  if (!home || !art) return;
+  const token = ++cameraRevealToken;
+  const box = art.getBoundingClientRect();
+  const homeBox = home.getBoundingClientRect();
+  home.style.transformOrigin = `${box.left + box.width / 2 - homeBox.left}px ${box.top + box.height / 2 - homeBox.top}px`;
+  home.classList.add('camera-transitioning');
+  requestAnimationFrame(() => {
+    if (token === cameraRevealToken) home.classList.add('camera-transitioned');
+  });
+  setTimeout(() => {
+    if (token === cameraRevealToken) home.classList.add('hidden');
+  }, 1180);
 }
 
 function notify(message, duration = 3200) {
@@ -44,9 +75,8 @@ function buildGallery() {
   artworks.forEach((art, index) => {
     const card = document.createElement('button');
     card.className = 'artwork-card';
-    card.innerHTML = `<img src="${art.image}" alt="${art.title}" loading="lazy"><span>${art.title}</span>`;
+    card.innerHTML = `<img src="${art.image}" alt="${art.title}" loading="lazy">`;
     card.addEventListener('click', () => {
-      $('#detail-title').textContent = art.title;
       $('#detail-image').src = art.image;
       showScreen('detail');
     });
@@ -402,7 +432,6 @@ async function startCamera() {
   const op = ++operation;
   pendingOperation = op;
   const startButton = $('#camera-start');
-  startButton.classList.remove('hidden');
   startButton.disabled = true;
   startButton.textContent = '準備しています';
   showScreen('camera-screen');
@@ -430,7 +459,6 @@ async function startCamera() {
   } catch (error) {
     shutdownMindAR();
     if (op !== operation) return;
-    showScreen('camera-screen');
     startButton.classList.remove('hidden');
     startButton.disabled = false;
     startButton.textContent = 'もう一度試す';
@@ -465,7 +493,7 @@ function restartCamera() {
 
 $('#camera-open').addEventListener('click', startCamera);
 $('#camera-start').addEventListener('click', startCamera);
-$('#camera-close').addEventListener('click', () => { stopCamera(); showScreen('home'); });
+$('#camera-close').addEventListener('click', () => { ++cameraRevealToken; stopCamera(); showScreen('home'); });
 $('#gallery-open').addEventListener('click', () => showScreen('gallery'));
 $('#help-open').addEventListener('click', () => showScreen('help'));
 document.querySelectorAll('[data-go-home]').forEach((button) => button.addEventListener('click', () => showScreen('home')));
