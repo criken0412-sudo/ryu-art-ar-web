@@ -101,6 +101,9 @@ class PoseSmoother {
     this.rawPosition = new THREE.Vector3();
     this.rawQuaternion = new THREE.Quaternion();
     this.rawScale = new THREE.Vector3();
+    this.previousRawPosition = new THREE.Vector3();
+    this.previousRawQuaternion = new THREE.Quaternion();
+    this.previousRawScale = new THREE.Vector3(1, 1, 1);
     this.reset();
   }
 
@@ -120,8 +123,10 @@ class PoseSmoother {
       const dt = Math.min(0.25, Math.max(0.001, (now - this.time) / 1000));
       const size = Math.max(1e-6, Math.abs(this.scale.x));
       // 移動の速さは「絵の幅に対する割合／秒」で測るため、絵の大きさや距離に左右されません。
-      const move = (this.rawPosition.distanceTo(this.position) + this.rawScale.distanceTo(this.scale)) / size / dt;
-      const turn = this.quaternion.angleTo(this.rawQuaternion) / dt;
+      // 速度は連続する未処理の認識結果から計算します。平滑化後の表示位置との差を使うと、
+      // フィルターの遅れまで速度として数えてしまい、静止中の小さな揺れにも過剰反応します。
+      const move = (this.rawPosition.distanceTo(this.previousRawPosition) + this.rawScale.distanceTo(this.previousRawScale)) / size / dt;
+      const turn = this.previousRawQuaternion.angleTo(this.rawQuaternion) / dt;
       const ad = smoothAlpha(dt, SMOOTH.dCutoff);
       this.moveSpeed += ad * (move - this.moveSpeed);
       this.turnSpeed += ad * (turn - this.turnSpeed);
@@ -131,6 +136,9 @@ class PoseSmoother {
       this.scale.lerp(this.rawScale, moveAlpha);
       this.quaternion.slerp(this.rawQuaternion, turnAlpha);
     }
+    this.previousRawPosition.copy(this.rawPosition);
+    this.previousRawQuaternion.copy(this.rawQuaternion);
+    this.previousRawScale.copy(this.rawScale);
     this.time = now;
     target.compose(this.position, this.quaternion, this.scale);
   }
